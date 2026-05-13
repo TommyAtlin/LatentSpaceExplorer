@@ -1,0 +1,270 @@
+import javafx.application.Application;
+import javafx.scene.Scene;
+import javafx.scene.chart.NumberAxis;
+import javafx.scene.chart.ScatterChart;
+import javafx.scene.chart.XYChart;
+import javafx.scene.control.Alert;
+import javafx.scene.control.Button;
+import javafx.scene.control.ComboBox;
+import javafx.scene.control.Label;
+import javafx.scene.control.TextField;
+import javafx.scene.control.Tooltip;
+import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.VBox;
+import javafx.stage.Stage;
+
+import java.util.List;
+
+public class MainApp extends Application {
+
+    private WordHolder holder;
+    private final ProjectionService projectionService = new ProjectionService();
+
+    private ScatterChart<Number, Number> scatterChart;
+    private ComboBox<Integer> xAxisBox;
+    private ComboBox<Integer> yAxisBox;
+    private TextField searchField;
+    private TextField word1Field;
+    private TextField word2Field;
+    private TextField kField;
+    private Label resultLabel;
+
+    @Override
+    public void start(Stage stage) {
+        stage.setTitle("LatentSpace Explorer");
+
+        try {
+            Json_Inter loader = new Json_Inter();
+            holder = loader.load("vectors_full.json", "vectors_pca.json");
+        } catch (Exception e) {
+            showError("Failed to load data: " + e.getMessage());
+            return;
+        }
+
+        NumberAxis xAxis = new NumberAxis();
+        NumberAxis yAxis = new NumberAxis();
+        xAxis.setLabel("PCA X");
+        yAxis.setLabel("PCA Y");
+
+        scatterChart = new ScatterChart<>(xAxis, yAxis);
+        scatterChart.setLegendVisible(false);
+
+        xAxisBox = new ComboBox<>();
+        yAxisBox = new ComboBox<>();
+
+        int pcaSize = holder.getWords().get(0).getPcaVector().size();
+        for (int i = 0; i < pcaSize; i++) {
+            xAxisBox.getItems().add(i);
+            yAxisBox.getItems().add(i);
+        }
+
+        xAxisBox.setValue(0);
+        yAxisBox.setValue(1);
+
+        Button updateAxesButton = new Button("Update Axes");
+        updateAxesButton.setOnAction(e -> refreshChart());
+
+        searchField = new TextField();
+        searchField.setPromptText("Search word");
+
+        Button searchButton = new Button("Search");
+        searchButton.setOnAction(e -> searchWord());
+
+        word1Field = new TextField();
+        word1Field.setPromptText("Word 1");
+
+        word2Field = new TextField();
+        word2Field.setPromptText("Word 2");
+
+        Button distanceButton = new Button("Distance");
+        distanceButton.setOnAction(e -> calculateDistance());
+
+        Button projectionButton = new Button("Custom Projection");
+        projectionButton.setOnAction(e -> customProjection());
+
+        kField = new TextField("5");
+        kField.setPrefWidth(50);
+
+        resultLabel = new Label("Ready");
+
+        HBox controls = new HBox(8);
+
+        controls.getChildren().addAll(
+                new Label("X:"), xAxisBox,
+                new Label("Y:"), yAxisBox,
+                updateAxesButton,
+                searchField, searchButton,
+                word1Field, word2Field,
+                distanceButton,
+                projectionButton,
+                new Label("K:"), kField
+        );
+
+
+        VBox top = new VBox(8, controls, resultLabel);
+        BorderPane root = new BorderPane();
+        root.setTop(top);
+        root.setCenter(scatterChart);
+
+        refreshChart();
+
+        Scene scene = new Scene(root, 1200, 750);
+        stage.setScene(scene);
+        stage.show();
+    }
+
+    private void refreshChart() {
+        scatterChart.getData().clear();
+
+        int xIndex = xAxisBox.getValue();
+        int yIndex = yAxisBox.getValue();
+
+        XYChart.Series<Number, Number> series = new XYChart.Series<>();
+
+        for (Word w : holder.getWords()) {
+            Point2D point = projectionService.projectWord(w, xIndex, yIndex);
+
+            XYChart.Data<Number, Number> data =
+                    new XYChart.Data<>(point.getX(), point.getY());
+
+            data.setExtraValue(w);
+
+            series.getData().add(data);
+        }
+
+        scatterChart.getData().add(series);
+
+        for (XYChart.Data<Number, Number> data : series.getData()) {
+            Word w = (Word) data.getExtraValue();
+
+            if (data.getNode() != null) {
+                Tooltip tooltip = new Tooltip(w.getWord());
+                Tooltip.install(data.getNode(), tooltip);
+
+                data.getNode().setOnMouseClicked(e -> showNearestWords(w));
+            }
+        }
+
+        resultLabel.setText("Showing PCA " + xIndex + " vs PCA " + yIndex);
+    }
+
+    private void searchWord() {
+        String text = searchField.getText().trim();
+
+        if (text.isEmpty()) {
+            resultLabel.setText("Enter a word to search.");
+            return;
+        }
+
+        Word w = holder.getWord(text);
+
+        if (w == null) {
+            resultLabel.setText("Word not found: " + text);
+            return;
+        }
+
+        Point2D point = projectionService.projectWord(w, xAxisBox.getValue(), yAxisBox.getValue());
+
+        NumberAxis xAxis = (NumberAxis) scatterChart.getXAxis();
+        NumberAxis yAxis = (NumberAxis) scatterChart.getYAxis();
+
+        xAxis.setAutoRanging(false);
+        yAxis.setAutoRanging(false);
+
+        xAxis.setLowerBound(point.getX() - 2);
+        xAxis.setUpperBound(point.getX() + 2);
+        yAxis.setLowerBound(point.getY() - 2);
+        yAxis.setUpperBound(point.getY() + 2);
+
+        resultLabel.setText("Centered on: " + w.getWord());
+    }
+
+    private void calculateDistance() {
+        Word w1 = holder.getWord(word1Field.getText().trim());
+        Word w2 = holder.getWord(word2Field.getText().trim());
+
+        if (w1 == null || w2 == null) {
+            resultLabel.setText("One of the words was not found.");
+            return;
+        }
+
+        Distance euclidean = new Distance(new Euclidean());
+        Distance cosine = new Distance(new Cosine());
+
+        double euc = euclidean.computeDistance(w1, w2);
+        double cos = cosine.computeDistance(w1, w2);
+
+        resultLabel.setText(
+                "Euclidean: " + euc + " | Cosine similarity: " + cos
+        );
+    }
+
+    private void showNearestWords(Word word) {
+        int k;
+
+        try {
+            k = Integer.parseInt(kField.getText().trim());
+        } catch (NumberFormatException e) {
+            resultLabel.setText("K must be a number.");
+            return;
+        }
+
+        KNearest nearest = new KNearest(new Euclidean());
+        List<Word> words = nearest.findNearest(word, holder, k);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("Nearest to ").append(word.getWord()).append(": ");
+
+        for (Word w : words) {
+            sb.append(w.getWord()).append(" ");
+        }
+
+        resultLabel.setText(sb.toString());
+    }
+
+    private void customProjection() {
+        Word start = holder.getWord(word1Field.getText().trim());
+        Word end = holder.getWord(word2Field.getText().trim());
+
+        if (start == null || end == null) {
+            resultLabel.setText("Choose two valid words for projection axis.");
+            return;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("Projection on axis ")
+                .append(start.getWord())
+                .append(" -> ")
+                .append(end.getWord())
+                .append(": ");
+
+        int count = 0;
+
+        for (Word w : holder.getWords()) {
+            if (count >= 10) break;
+
+            double value = projectionService.projectOnCustomAxis(w, start, end);
+            sb.append(w.getWord())
+                    .append("=")
+                    .append(String.format("%.2f", value))
+                    .append(" ");
+
+            count++;
+        }
+
+        resultLabel.setText(sb.toString());
+    }
+
+    private void showError(String message) {
+        Alert alert = new Alert(Alert.AlertType.ERROR);
+        alert.setTitle("Error");
+        alert.setHeaderText("Application Error");
+        alert.setContentText(message);
+        alert.showAndWait();
+    }
+
+    public static void main(String[] args) {
+        launch(args);
+    }
+}
